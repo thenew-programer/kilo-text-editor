@@ -21,15 +21,26 @@ enum editorKey {
   ARROW_UP,
   ARROW_DOWN,
   PAGE_UP,
-  PAGE_DOWN
+  PAGE_DOWN,
+  HOME_KEY,
+  END_KEY,
+  DELETE_KEY
 };
 /*** data ***/
+
+typedef struct erow {
+  int size;
+  // char **chars;
+  char *chars;
+} erow;
 
 struct editorConfig {
   int cx, cy;
   int screenrows;
   int screencols;
   struct termios orig_termios;
+  int numrows;
+  erow rows;
 };
 struct editorConfig E;
 
@@ -77,7 +88,16 @@ int editorReadKey() {
       return '\x1b';
     if (read(STDIN_FILENO, &seq[1], 1) != 1)
       return '\x1b';
-    if (seq[0] == '[') {
+    if (seq[1] == 'O') {
+      if (read(STDIN_FILENO, &seq[2], 1) != 1)
+        return ('\x1b');
+      switch (seq[2]) {
+      case 'H':
+        return HOME_KEY;
+      case 'F':
+        return END_KEY;
+      }
+    } else if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
         if (read(STDIN_FILENO, &seq[2], 1) != 1)
           return '\x1b';
@@ -87,6 +107,16 @@ int editorReadKey() {
             return PAGE_UP;
           case '6':
             return PAGE_DOWN;
+          case '1':
+          case '7':
+          case 'H':
+            return HOME_KEY;
+          case '4':
+          case '8':
+          case 'F':
+            return END_KEY;
+          case '3':
+            return DELETE_KEY;
           }
         }
       } else {
@@ -139,6 +169,80 @@ int getWindowSize(int *rows, int *cols) {
     *rows = ws.ws_row;
     return (0);
   }
+}
+
+/*** utils ***/
+
+ssize_t fileLines(char *filename) {
+  ssize_t fileLines = 0;
+  char *line;
+  char chunk[128];
+  ssize_t len = sizeof(chunk);
+  FILE *fp = fopen(filename, "r");
+  if (!fp)
+    die("fopen");
+
+  line = (char *)malloc(len);
+  if (!line)
+    die("malloc");
+
+  line[0] = '\0';
+
+  while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+    ssize_t len_used = strlen(line);
+    ssize_t chunk_used = strlen(chunk);
+    if (len - len_used < chunk_used) {
+      len *= 2;
+      line = realloc(line, len);
+      if (!line)
+        die("realloc");
+    }
+    memcpy(line + len_used, chunk, len - len_used);
+    len_used += chunk_used;
+    if (line[len_used - 1] == '\n') {
+      fileLines++;
+      line[0] = '\0';
+    }
+  }
+  free(line);
+  fclose(fp);
+  return (fileLines);
+}
+
+/*** file i/o ***/
+
+void editorOpen(char *filename) {
+  ssize_t filelines = fileLines(filename);
+  char line[50];
+  ssize_t linelen;
+  linelen = (ssize_t)snprintf(line, sizeof(line), "This file has %zu lines",
+                              filelines);
+  E.rows.size = linelen;
+  E.rows.chars = (char *)malloc(linelen);
+  memcpy(E.rows.chars, line, linelen);
+  E.numrows = 1;
+  // FILE *fp = fopen(filename, "r");
+  // if (fp == NULL)
+  //   die("fopen");
+  // char *line = NULL;
+  // ssize_t linecap = 0, linelen;
+  // linelen = getline(&line, &linecap, fp);
+  // if (linelen != -1) {
+  //   E.rows.chars = (char **)malloc(fileLines);
+  //   while (linelen > 0 &&
+  //          (line[linelen - 1] == '\r' || line[linelen - 1] == '\n'))
+  //     --linelen;
+  //
+  //   E.rows.size = linelen;
+  //   E.rows.chars = (char *)malloc(linelen + 1);
+  //   memcpy(E.rows.chars, line, linelen);
+  //   E.rows.chars[linelen] = '\0';
+  //   E.numrows = 1;
+  // } else {
+  //   die("getline");
+  // }
+  // free(line);
+  // fclose(fp);
 }
 
 /*** append buffer ***/
@@ -199,6 +303,12 @@ void editorProcessKeypress() {
     while (times--)
       editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
   } break;
+  case HOME_KEY:
+  case END_KEY: {
+    int times = E.screencols;
+    while (times--)
+      editorMoveCursor(c == HOME_KEY ? ARROW_LEFT : ARROW_RIGHT);
+  } break;
   case ARROW_UP:
   case ARROW_DOWN:
   case ARROW_LEFT:
@@ -213,22 +323,29 @@ void editorProcessKeypress() {
 void editorDrawRows(struct abuf *ab) {
   int y;
   for (y = 0; y < E.screenrows; y++) {
-    if (y == E.screenrows / 3) {
-      char welcome[80];
-      int welcomelen = snprintf(welcome, sizeof(welcome),
-                                "Kilo editor -- version %s", KILO_VERSION);
-      if (welcomelen > E.screencols)
-        welcomelen = E.screencols;
-      int padding = (E.screencols - welcomelen) / 2;
-      if (padding) {
+    if (y >= E.numrows) {
+      if (y == E.screenrows / 3) {
+        char welcome[80];
+        int welcomelen = snprintf(welcome, sizeof(welcome),
+                                  "Kilo editor -- version %s", KILO_VERSION);
+        if (welcomelen > E.screencols)
+          welcomelen = E.screencols;
+        int padding = (E.screencols - welcomelen) / 2;
+        if (padding) {
+          abAppend(ab, "~", 1);
+          padding--;
+        }
+        while (padding--)
+          abAppend(ab, " ", 1);
+        abAppend(ab, welcome, welcomelen);
+      } else {
         abAppend(ab, "~", 1);
-        padding--;
       }
-      while (padding--)
-        abAppend(ab, " ", 1);
-      abAppend(ab, welcome, welcomelen);
     } else {
-      abAppend(ab, "~", 1);
+      int len = E.rows.size;
+      if (len > E.screencols)
+        len = E.screencols;
+      abAppend(ab, E.rows.chars, len);
     }
 
     abAppend(ab, "\x1b[K", 3);
@@ -259,6 +376,7 @@ void editorRefreshScreen() {
 void initEditor() {
   E.cx = 0;
   E.cy = 0;
+  E.numrows = 0;
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     die("getWindowSize");
 }
@@ -266,6 +384,8 @@ void initEditor() {
 int main(int argc, char *argv[]) {
   enableRawMode();
   initEditor();
+  if (argc >= 2)
+    editorOpen(argv[1]);
 
   while (1) {
     editorRefreshScreen();
